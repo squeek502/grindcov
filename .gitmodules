@@ -1,0 +1,4 @@
+[submodule "lib/zig-clap"]
+	path = lib/zig-clap
+	url = https://github.com/squeek502/zig-clap
+	branch = zig-master

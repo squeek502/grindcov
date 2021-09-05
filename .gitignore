@@ -1,0 +1,4 @@
+coverage/
+callgrind.out.*
+zig-out
+zig-cache
