@@ -61,11 +61,13 @@ pub fn main() anyerror!void {
         std.debug.print("Kept callgrind out file: '{s}'\n", .{callgrind_out_path});
     }
 
-    var coverage = try getCoverage(allocator, callgrind_out_path);
+    var coverage = Coverage.init(allocator);
     defer coverage.deinit();
 
+    try coverage.getFromPath(allocator, callgrind_out_path);
+
     for (args.options("--include")) |include_callgrind_out_path| {
-        mergeCoverage(allocator, include_callgrind_out_path, &coverage) catch |err| switch (err) {
+        coverage.getFromPath(allocator, include_callgrind_out_path) catch |err| switch (err) {
             error.FileNotFound => |e| {
                 std.debug.print("Included callgrind out file not found: {s}\n", .{include_callgrind_out_path});
                 return e;
@@ -152,68 +154,6 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
     return callgrind_out_path;
 }
 
-pub fn getCoverage(allocator: *Allocator, callgrind_file_path: []const u8) !Coverage {
-    var coverage = Coverage.init(allocator);
-    errdefer coverage.deinit();
-
-    try mergeCoverage(allocator, callgrind_file_path, &coverage);
-
-    return coverage;
-}
-
-pub fn mergeCoverage(allocator: *Allocator, callgrind_file_path: []const u8, coverage: *Coverage) !void {
-    var callgrind_file = try std.fs.cwd().openFile(callgrind_file_path, .{});
-    defer callgrind_file.close();
-
-    var current_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    var current_path: ?[]u8 = null;
-
-    var reader = std.io.bufferedReader(callgrind_file.reader()).reader();
-    while (try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', std.math.maxInt(usize))) |_line| {
-        defer allocator.free(_line);
-        var line = std.mem.trimRight(u8, _line, "\r");
-
-        const is_source_file_path = std.mem.startsWith(u8, line, "fl=") or std.mem.startsWith(u8, line, "fi=") or std.mem.startsWith(u8, line, "fe=");
-        if (is_source_file_path) {
-            var path = line[3..];
-            if (std.fs.cwd().access(path, .{})) {
-                std.mem.copy(u8, current_path_buf[0..], path);
-                current_path = current_path_buf[0..path.len];
-            } else |_| {
-                current_path = null;
-            }
-            continue;
-        }
-        if (current_path == null) {
-            continue;
-        }
-
-        const is_jump = std.mem.startsWith(u8, line, "jump=") or std.mem.startsWith(u8, line, "jncd=");
-        var line_num: usize = 0;
-        if (is_jump) {
-            line = line[5..];
-            // jcnd seems to use a '/' to separate exe-count and jump-count, although
-            // https://valgrind.org/docs/manual/cl-format.html doesn't seem to think so
-            // target-position is always last, though, so just get the last tok
-            var tok_it = std.mem.tokenize(u8, line, " /");
-            var last_tok = tok_it.next() orelse continue;
-            while (tok_it.next()) |tok| {
-                last_tok = tok;
-            }
-            line_num = try std.fmt.parseInt(usize, last_tok, 10);
-        } else {
-            var tok_it = std.mem.tokenize(u8, line, " ");
-            var first_tok = tok_it.next() orelse continue;
-            line_num = std.fmt.parseInt(usize, first_tok, 10) catch continue;
-        }
-
-        // not sure exactly what causes this, but ignore line nums given as 0
-        if (line_num == 0) continue;
-
-        try coverage.markCovered(current_path.?, line_num);
-    }
-}
-
 const Coverage = struct {
     allocator: *Allocator,
     paths_to_covered_line_nums: Info,
@@ -236,6 +176,59 @@ const Coverage = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.paths_to_covered_line_nums.deinit(self.allocator);
+    }
+
+    pub fn getFromPath(coverage: *Coverage, allocator: *Allocator, callgrind_file_path: []const u8) !void {
+        var callgrind_file = try std.fs.cwd().openFile(callgrind_file_path, .{});
+        defer callgrind_file.close();
+
+        var current_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var current_path: ?[]u8 = null;
+
+        var reader = std.io.bufferedReader(callgrind_file.reader()).reader();
+        while (try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', std.math.maxInt(usize))) |_line| {
+            defer allocator.free(_line);
+            var line = std.mem.trimRight(u8, _line, "\r");
+
+            const is_source_file_path = std.mem.startsWith(u8, line, "fl=") or std.mem.startsWith(u8, line, "fi=") or std.mem.startsWith(u8, line, "fe=");
+            if (is_source_file_path) {
+                var path = line[3..];
+                if (std.fs.cwd().access(path, .{})) {
+                    std.mem.copy(u8, current_path_buf[0..], path);
+                    current_path = current_path_buf[0..path.len];
+                } else |_| {
+                    current_path = null;
+                }
+                continue;
+            }
+            if (current_path == null) {
+                continue;
+            }
+
+            const is_jump = std.mem.startsWith(u8, line, "jump=") or std.mem.startsWith(u8, line, "jncd=");
+            var line_num: usize = 0;
+            if (is_jump) {
+                line = line[5..];
+                // jcnd seems to use a '/' to separate exe-count and jump-count, although
+                // https://valgrind.org/docs/manual/cl-format.html doesn't seem to think so
+                // target-position is always last, though, so just get the last tok
+                var tok_it = std.mem.tokenize(u8, line, " /");
+                var last_tok = tok_it.next() orelse continue;
+                while (tok_it.next()) |tok| {
+                    last_tok = tok;
+                }
+                line_num = try std.fmt.parseInt(usize, last_tok, 10);
+            } else {
+                var tok_it = std.mem.tokenize(u8, line, " ");
+                var first_tok = tok_it.next() orelse continue;
+                line_num = std.fmt.parseInt(usize, first_tok, 10) catch continue;
+            }
+
+            // not sure exactly what causes this, but ignore line nums given as 0
+            if (line_num == 0) continue;
+
+            try coverage.markCovered(current_path.?, line_num);
+        }
     }
 
     pub fn markCovered(self: *Coverage, path: []const u8, line_num: usize) !void {
