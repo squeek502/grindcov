@@ -19,6 +19,7 @@ pub fn main() anyerror!void {
         clap.parseParam("--output-dir <PATH>   Directory to put the results. (default: './coverage')") catch unreachable,
         clap.parseParam("--cwd <PATH>          Directory to run the valgrind process from. (default: '.')") catch unreachable,
         clap.parseParam("--keep-outfile        Do not delete the callgrind file that gets generated.") catch unreachable,
+        clap.parseParam("--include <PATH>...   Include the specified callgrind file(s) when generating\ncoverage (can be specified multiple times).") catch unreachable,
         clap.parseParam("<CMD...>...") catch unreachable,
     };
 
@@ -62,6 +63,16 @@ pub fn main() anyerror!void {
 
     var coverage = try getCoverage(allocator, callgrind_out_path);
     defer coverage.deinit();
+
+    for (args.options("--include")) |include_callgrind_out_path| {
+        mergeCoverage(allocator, include_callgrind_out_path, &coverage) catch |err| switch (err) {
+            error.FileNotFound => |e| {
+                std.debug.print("Included callgrind out file not found: {s}\n", .{include_callgrind_out_path});
+                return e;
+            },
+            else => |e| return e,
+        };
+    }
 
     const output_dir = args.option("--output-dir") orelse "coverage";
 
@@ -145,6 +156,12 @@ pub fn getCoverage(allocator: *Allocator, callgrind_file_path: []const u8) !Cove
     var coverage = Coverage.init(allocator);
     errdefer coverage.deinit();
 
+    try mergeCoverage(allocator, callgrind_file_path, &coverage);
+
+    return coverage;
+}
+
+pub fn mergeCoverage(allocator: *Allocator, callgrind_file_path: []const u8, coverage: *Coverage) !void {
     var callgrind_file = try std.fs.cwd().openFile(callgrind_file_path, .{});
     defer callgrind_file.close();
 
@@ -195,8 +212,6 @@ pub fn getCoverage(allocator: *Allocator, callgrind_file_path: []const u8) !Cove
 
         try coverage.markCovered(current_path.?, line_num);
     }
-
-    return coverage;
 }
 
 const Coverage = struct {

@@ -52,6 +52,8 @@ Available options:
 	    --output-dir <PATH>	Directory to put the results. (default: './coverage')
 	    --cwd <PATH>       	Directory to run the valgrind process from. (default: '.')
 	    --keep-outfile     	Do not delete the callgrind file that gets generated.
+	    --include <PATH>...	Include the specified callgrind file(s) when generating
+	                       	coverage (can be specified multiple times).
 ```
 
 ### Integrating with Zig
