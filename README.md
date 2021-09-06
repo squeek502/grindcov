@@ -44,16 +44,20 @@ Requires latest master of Zig. Currently only tested on Linux.
 Usage: grindcov [options] -- <cmd> [<args>...]
 
 Available options:
-	-h, --help             	Display this help and exit.
-	    --root <PATH>      	Root directory for source files.
-	                       	- Files outside of the root directory are not reported on.
-	                       	- Output paths are relative to the root directory.
-	                       	(default: '.')
-	    --output-dir <PATH>	Directory to put the results. (default: './coverage')
-	    --cwd <PATH>       	Directory to run the valgrind process from. (default: '.')
-	    --keep-outfile     	Do not delete the callgrind file that gets generated.
-	    --include <PATH>...	Include the specified callgrind file(s) when generating
-	                       	coverage (can be specified multiple times).
+	-h, --help                	Display this help and exit.
+	    --root <PATH>         	Root directory for source files.
+	                          	- Files outside of the root directory are not reported on.
+	                          	- Output paths are relative to the root directory.
+	                          	(default: '.')
+	    --output-dir <PATH>   	Directory to put the results. (default: './coverage')
+	    --cwd <PATH>          	Directory to run the valgrind process from. (default: '.')
+	    --keep-out-file       	Do not delete the callgrind file that gets generated.
+	    --out-file-name <PATH>	Set the name of the callgrind.out file.
+	                          	(default: 'callgrind.out.%p')
+	    --include <PATH>...   	Include the specified callgrind file(s) when generating
+	                          	coverage (can be specified multiple times).
+	    --skip-collect        	Skip the callgrind data collection step.
+	    --skip-report         	Skip the coverage report generation step.
 ```
 
 ### Integrating with Zig

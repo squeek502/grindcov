@@ -16,10 +16,13 @@ pub fn main() anyerror!void {
             \\- Output paths are relative to the root directory.
             \\(default: '.')
         ) catch unreachable,
-        clap.parseParam("--output-dir <PATH>   Directory to put the results. (default: './coverage')") catch unreachable,
-        clap.parseParam("--cwd <PATH>          Directory to run the valgrind process from. (default: '.')") catch unreachable,
-        clap.parseParam("--keep-outfile        Do not delete the callgrind file that gets generated.") catch unreachable,
-        clap.parseParam("--include <PATH>...   Include the specified callgrind file(s) when generating\ncoverage (can be specified multiple times).") catch unreachable,
+        clap.parseParam("--output-dir <PATH>     Directory to put the results. (default: './coverage')") catch unreachable,
+        clap.parseParam("--cwd <PATH>            Directory to run the valgrind process from. (default: '.')") catch unreachable,
+        clap.parseParam("--keep-out-file         Do not delete the callgrind file that gets generated.") catch unreachable,
+        clap.parseParam("--out-file-name <PATH>  Set the name of the callgrind.out file.\n(default: 'callgrind.out.%p')") catch unreachable,
+        clap.parseParam("--include <PATH>...     Include the specified callgrind file(s) when generating\ncoverage (can be specified multiple times).") catch unreachable,
+        clap.parseParam("--skip-collect          Skip the callgrind data collection step.") catch unreachable,
+        clap.parseParam("--skip-report           Skip the coverage report generation step.") catch unreachable,
         clap.parseParam("<CMD...>...") catch unreachable,
     };
 
@@ -30,7 +33,18 @@ pub fn main() anyerror!void {
     };
     defer args.deinit();
 
-    if (args.flag("--help") or args.positionals().len == 0) {
+    if (args.flag("--skip-collect") and args.flag("--skip-report")) {
+        std.debug.print("Error: Nothing to do (--skip-collect and --skip-report are both set.)\n", .{});
+        return error.NothingToDo;
+    }
+
+    if (args.flag("--skip-collect") and args.options("--include").len == 0) {
+        std.debug.print("Error: --skip-collect is set but no callgrind.out files were specified. At least one callgrind.out file must be specified with --include in order to generate a report when --skip-collect is set.\n", .{});
+        return error.NoCoverageData;
+    }
+
+    var should_print_usage = !args.flag("--skip-collect") and args.positionals().len == 0;
+    if (args.flag("--help") or should_print_usage) {
         const writer = std.io.getStdErr().writer();
         try writer.writeAll("Usage: grindcov [options] -- <cmd> [<args>...]\n\n");
         try writer.writeAll("Available options:\n");
@@ -51,54 +65,59 @@ pub fn main() anyerror!void {
     };
     defer allocator.free(root_dir);
 
-    const callgrind_out_path = try genCallgrind(allocator, args.positionals(), args.option("--cwd"));
-    defer allocator.free(callgrind_out_path);
-    defer if (!args.flag("--keep-outfile")) {
-        std.fs.cwd().deleteFile(callgrind_out_path) catch {};
-    };
-
-    if (args.flag("--keep-outfile")) {
-        std.debug.print("Kept callgrind out file: '{s}'\n", .{callgrind_out_path});
-    }
-
     var coverage = Coverage.init(allocator);
     defer coverage.deinit();
 
-    try coverage.getFromPath(allocator, callgrind_out_path);
-
-    for (args.options("--include")) |include_callgrind_out_path| {
-        coverage.getFromPath(allocator, include_callgrind_out_path) catch |err| switch (err) {
-            error.FileNotFound => |e| {
-                std.debug.print("Included callgrind out file not found: {s}\n", .{include_callgrind_out_path});
-                return e;
-            },
-            else => |e| return e,
+    if (!args.flag("--skip-collect")) {
+        const callgrind_out_path = try genCallgrind(allocator, args.positionals(), args.option("--cwd"), args.option("--out-file-name"));
+        defer allocator.free(callgrind_out_path);
+        defer if (!args.flag("--keep-out-file")) {
+            std.fs.cwd().deleteFile(callgrind_out_path) catch {};
         };
+
+        if (args.flag("--keep-out-file")) {
+            std.debug.print("Kept callgrind out file: '{s}'\n", .{callgrind_out_path});
+        }
+
+        try coverage.getFromPath(allocator, callgrind_out_path);
     }
 
-    const output_dir = args.option("--output-dir") orelse "coverage";
-
-    try std.fs.cwd().deleteTree(output_dir);
-    var out_dir = try std.fs.cwd().makeOpenPath(output_dir, .{});
-    defer out_dir.close();
-
-    const num_dumped = try coverage.dumpDiffsToDir(out_dir, root_dir);
-
-    if (num_dumped == 0) {
-        std.debug.print("Warning: No source files were included in the coverage results. If this is unexpected, check to make sure that the root directory is set appropriately.\n", .{});
-        std.debug.print(" - Current --root setting: ", .{});
-        if (args.option("--root")) |setting| {
-            std.debug.print("'{s}'\n", .{setting});
-        } else {
-            std.debug.print("(not specified)\n", .{});
+    if (!args.flag("--skip-report")) {
+        for (args.options("--include")) |include_callgrind_out_path| {
+            coverage.getFromPath(allocator, include_callgrind_out_path) catch |err| switch (err) {
+                error.FileNotFound => |e| {
+                    std.debug.print("Included callgrind out file not found: {s}\n", .{include_callgrind_out_path});
+                    return e;
+                },
+                else => |e| return e,
+            };
         }
-        std.debug.print(" - Current root directory: '{s}'\n", .{root_dir});
-    } else {
-        std.debug.print("Results for {} source files generated in directory '{s}'\n", .{ num_dumped, output_dir });
+
+        const output_dir = args.option("--output-dir") orelse "coverage";
+
+        try std.fs.cwd().deleteTree(output_dir);
+        var out_dir = try std.fs.cwd().makeOpenPath(output_dir, .{});
+        defer out_dir.close();
+
+        const num_dumped = try coverage.dumpDiffsToDir(out_dir, root_dir);
+
+        if (num_dumped == 0) {
+            std.debug.print("Warning: No source files were included in the coverage results. ", .{});
+            std.debug.print("If this is unexpected, check to make sure that the root directory is set appropriately.\n", .{});
+            std.debug.print(" - Current --root setting: ", .{});
+            if (args.option("--root")) |setting| {
+                std.debug.print("'{s}'\n", .{setting});
+            } else {
+                std.debug.print("(not specified)\n", .{});
+            }
+            std.debug.print(" - Current root directory: '{s}'\n", .{root_dir});
+        } else {
+            std.debug.print("Results for {} source files generated in directory '{s}'\n", .{ num_dumped, output_dir });
+        }
     }
 }
 
-pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?[]const u8) ![]const u8 {
+pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?[]const u8, custom_out_file_name: ?[]const u8) ![]const u8 {
     const valgrind_args = &[_][]const u8{
         "valgrind",
         "--tool=callgrind",
@@ -107,8 +126,16 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
         "--collect-jumps=yes",
     };
 
+    var out_file_name = custom_out_file_name orelse "callgrind.out.%p";
+    var out_file_arg = try std.mem.concat(allocator, u8, &[_][]const u8{
+        "--callgrind-out-file=",
+        out_file_name,
+    });
+    defer allocator.free(out_file_arg);
+
     const args = try std.mem.concat(allocator, []const u8, &[_][]const []const u8{
         valgrind_args,
+        &[_][]const u8{out_file_arg},
         user_args,
     });
     defer allocator.free(args);
@@ -130,19 +157,30 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
         return error.CallgrindError;
     }
 
-    const maybe_first_equals = std.mem.indexOf(u8, result.stderr, "==");
-    if (maybe_first_equals == null) {
-        std.debug.print("{s}\n", .{result.stderr});
-        return error.UnableToFindPid;
-    }
-    const first_equals = maybe_first_equals.?;
-    const next_equals_offset = std.mem.indexOf(u8, result.stderr[(first_equals + 2)..], "==").?;
-    const pid_as_string = result.stderr[(first_equals + 2)..(first_equals + 2 + next_equals_offset)];
+    // TODO: this would get blown up by %%p which is meant to be an escaped % and a p
+    var pid_pattern_count = std.mem.count(u8, out_file_name, "%p");
+    var callgrind_out_path = callgrind_out_path: {
+        if (pid_pattern_count > 0) {
+            const maybe_first_equals = std.mem.indexOf(u8, result.stderr, "==");
+            if (maybe_first_equals == null) {
+                std.debug.print("{s}\n", .{result.stderr});
+                return error.UnableToFindPid;
+            }
+            const first_equals = maybe_first_equals.?;
+            const next_equals_offset = std.mem.indexOf(u8, result.stderr[(first_equals + 2)..], "==").?;
+            const pid_as_string = result.stderr[(first_equals + 2)..(first_equals + 2 + next_equals_offset)];
 
-    var callgrind_out_path = try std.mem.concat(allocator, u8, &[_][]const u8{
-        "callgrind.out.",
-        pid_as_string,
-    });
+            const delta_mem_needed: i64 = @intCast(i64, pid_pattern_count) * (@intCast(i64, pid_as_string.len) - @as(i64, 2));
+            const mem_needed = @intCast(usize, @intCast(i64, out_file_name.len) + delta_mem_needed);
+            const buf = try allocator.alloc(u8, mem_needed);
+            _ = std.mem.replace(u8, out_file_name, "%p", pid_as_string, buf);
+
+            break :callgrind_out_path buf;
+        } else {
+            break :callgrind_out_path try allocator.dupe(u8, out_file_name);
+        }
+    };
+
     if (cwd) |cwd_path| {
         var cwd_callgrind_out_path = try std.fs.path.join(allocator, &[_][]const u8{
             cwd_path,
