@@ -23,6 +23,7 @@ pub fn main() anyerror!void {
         clap.parseParam("--include <PATH>...     Include the specified callgrind file(s) when generating\ncoverage (can be specified multiple times).") catch unreachable,
         clap.parseParam("--skip-collect          Skip the callgrind data collection step.") catch unreachable,
         clap.parseParam("--skip-report           Skip the coverage report generation step.") catch unreachable,
+        clap.parseParam("--skip-summary          Skip printing a summary to stdout.") catch unreachable,
         clap.parseParam("<CMD...>...") catch unreachable,
     };
 
@@ -32,6 +33,17 @@ pub fn main() anyerror!void {
         return err;
     };
     defer args.deinit();
+
+    const valgrind_available = try checkCommandAvailable(allocator, "valgrind");
+    if (!valgrind_available) {
+        std.debug.print("Error: valgrind not found, make sure valgrind is installed.\n", .{});
+        return error.NoValgrind;
+    }
+
+    const readelf_available = try checkCommandAvailable(allocator, "readelf");
+    if (!readelf_available) {
+        std.debug.print("Warning: readelf not found, information about executable lines will not be available.\n", .{});
+    }
 
     if (args.flag("--skip-collect") and args.flag("--skip-report")) {
         std.debug.print("Error: Nothing to do (--skip-collect and --skip-report are both set.)\n", .{});
@@ -79,12 +91,24 @@ pub fn main() anyerror!void {
             std.debug.print("Kept callgrind out file: '{s}'\n", .{callgrind_out_path});
         }
 
-        try coverage.getFromPath(allocator, callgrind_out_path);
+        try coverage.getCoveredLines(allocator, callgrind_out_path);
+    }
+
+    var got_executable_line_info = false;
+    if (readelf_available) {
+        got_executable_line_info = true;
+        coverage.getExecutableLines(allocator, args.positionals()[0], args.option("--cwd")) catch |err| switch (err) {
+            error.ReadElfError => {
+                got_executable_line_info = false;
+                std.debug.print("Warning: Unable to use readelf to get information about executable lines. This information will not be in the results.\n", .{});
+            },
+            else => |e| return e,
+        };
     }
 
     if (!args.flag("--skip-report")) {
         for (args.options("--include")) |include_callgrind_out_path| {
-            coverage.getFromPath(allocator, include_callgrind_out_path) catch |err| switch (err) {
+            coverage.getCoveredLines(allocator, include_callgrind_out_path) catch |err| switch (err) {
                 error.FileNotFound => |e| {
                     std.debug.print("Included callgrind out file not found: {s}\n", .{include_callgrind_out_path});
                     return e;
@@ -115,6 +139,29 @@ pub fn main() anyerror!void {
             std.debug.print("Results for {} source files generated in directory '{s}'\n", .{ num_dumped, output_dir });
         }
     }
+
+    if (!args.flag("--skip-summary") and got_executable_line_info) {
+        std.debug.print("\n", .{});
+        try coverage.writeSummary(std.io.getStdOut().writer(), root_dir);
+    }
+}
+
+pub fn checkCommandAvailable(allocator: *Allocator, cmd: []const u8) !bool {
+    const result = std.ChildProcess.exec(.{
+        .allocator = allocator,
+        .argv = &[_][]const u8{ cmd, "--version" },
+    }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const failed = switch (result.term) {
+        .Exited => |exit_code| exit_code != 0,
+        else => true,
+    };
+    return !failed;
 }
 
 pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?[]const u8, custom_out_file_name: ?[]const u8) ![]const u8 {
@@ -144,6 +191,7 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
         .allocator = allocator,
         .argv = args,
         .cwd = cwd,
+        .max_output_bytes = std.math.maxInt(usize),
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -194,29 +242,35 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
 
 const Coverage = struct {
     allocator: *Allocator,
-    paths_to_covered_line_nums: Info,
+    paths_to_file_info: Info,
 
-    pub const CoveredLineSet = std.AutoHashMapUnmanaged(usize, void);
-    pub const Info = std.StringHashMapUnmanaged(*CoveredLineSet);
+    pub const LineSet = std.AutoHashMapUnmanaged(usize, void);
+    pub const FileInfo = struct {
+        covered: *LineSet,
+        executable: *LineSet,
+    };
+    pub const Info = std.StringHashMapUnmanaged(FileInfo);
 
     pub fn init(allocator: *Allocator) Coverage {
         return .{
             .allocator = allocator,
-            .paths_to_covered_line_nums = Coverage.Info{},
+            .paths_to_file_info = Coverage.Info{},
         };
     }
 
     pub fn deinit(self: *Coverage) void {
-        var it = self.paths_to_covered_line_nums.iterator();
+        var it = self.paths_to_file_info.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
+            entry.value_ptr.covered.deinit(self.allocator);
+            entry.value_ptr.executable.deinit(self.allocator);
+            self.allocator.destroy(entry.value_ptr.covered);
+            self.allocator.destroy(entry.value_ptr.executable);
             self.allocator.free(entry.key_ptr.*);
         }
-        self.paths_to_covered_line_nums.deinit(self.allocator);
+        self.paths_to_file_info.deinit(self.allocator);
     }
 
-    pub fn getFromPath(coverage: *Coverage, allocator: *Allocator, callgrind_file_path: []const u8) !void {
+    pub fn getCoveredLines(coverage: *Coverage, allocator: *Allocator, callgrind_file_path: []const u8) !void {
         var callgrind_file = try std.fs.cwd().openFile(callgrind_file_path, .{});
         defer callgrind_file.close();
 
@@ -269,23 +323,121 @@ const Coverage = struct {
         }
     }
 
-    pub fn markCovered(self: *Coverage, path: []const u8, line_num: usize) !void {
-        var entry = try self.paths_to_covered_line_nums.getOrPut(self.allocator, path);
-        if (!entry.found_existing) {
-            entry.key_ptr.* = try self.allocator.dupe(u8, path);
-            var created_set = try self.allocator.create(CoveredLineSet);
-            created_set.* = CoveredLineSet{};
-            entry.value_ptr.* = created_set;
+    pub fn getExecutableLines(coverage: *Coverage, allocator: *Allocator, cmd: []const u8, cwd: ?[]const u8) !void {
+        // TODO: instead of readelf, use Zig's elf/dwarf std lib functions
+        const result = try std.ChildProcess.exec(.{
+            .allocator = allocator,
+            .argv = &[_][]const u8{
+                "readelf",
+                // to get DW_AT_comp_dir
+                "--debug-dump=info",
+                "--dwarf-depth=1",
+                // to get the line nums
+                "--debug-dump=decodedline",
+                cmd,
+            },
+            .cwd = cwd,
+            .max_output_bytes = std.math.maxInt(usize),
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        const failed = switch (result.term) {
+            .Exited => |exit_code| exit_code != 0,
+            else => true,
+        };
+        if (failed) {
+            std.debug.print("{s}\n", .{result.stderr});
+            return error.ReadElfError;
         }
 
-        var line_set = entry.value_ptr.*;
-        try line_set.put(self.allocator, line_num, {});
+        const debug_line_start_line = "Contents of the .debug_line section:\n";
+        var start_of_debug_line = std.mem.indexOf(u8, result.stdout, debug_line_start_line) orelse return error.MissingDebugLine;
+
+        const debug_info_section = result.stdout[0..start_of_debug_line];
+        const main_comp_dir_start = std.mem.indexOf(u8, debug_info_section, "DW_AT_comp_dir") orelse return error.MissingCompDir;
+        const main_comp_dir_line_end = std.mem.indexOfScalar(u8, debug_info_section[main_comp_dir_start..], '\n').?;
+        const main_comp_dir_line = debug_info_section[main_comp_dir_start..(main_comp_dir_start + main_comp_dir_line_end)];
+        const main_comp_dir_sep_pos = std.mem.lastIndexOf(u8, main_comp_dir_line, "): ").?;
+        const main_comp_dir = main_comp_dir_line[(main_comp_dir_sep_pos + 3)..];
+
+        var line_it = std.mem.split(u8, result.stdout[start_of_debug_line..], "\n");
+        var past_header = false;
+        var file_path: ?[]const u8 = null;
+        var file_path_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var file_path_basename: ?[]const u8 = null;
+        while (line_it.next()) |line| {
+            if (!past_header) {
+                if (std.mem.startsWith(u8, line, "File name ")) {
+                    past_header = true;
+                }
+                continue;
+            }
+
+            if (line.len == 0) {
+                file_path = null;
+                file_path_basename = null;
+                continue;
+            }
+
+            if (file_path == null) {
+                if (std.mem.endsWith(u8, line, ":")) {
+                    file_path = std.mem.trimRight(u8, line, ":");
+                }
+                // some files are relative to the main_comp_dir, they are indicated
+                // by the suffix [++]
+                else if (std.mem.endsWith(u8, line, ":[++]")) {
+                    const relative_file_path = line[0..(line.len - (":[++]").len)];
+                    const resolved_path = try std.fs.path.resolve(allocator, &[_][]const u8{ main_comp_dir, relative_file_path });
+                    defer allocator.free(resolved_path);
+                    std.mem.copy(u8, &file_path_buf, resolved_path);
+                    file_path = file_path_buf[0..resolved_path.len];
+                } else {
+                    std.debug.print("Unhandled line, expecting a file path line: '{s}'\n", .{line});
+                    @panic("Unhandled readelf output");
+                }
+                file_path_basename = std.fs.path.basename(file_path.?);
+                continue;
+            }
+
+            const past_basename = line[(file_path_basename.?.len)..];
+            var tok_it = std.mem.tokenize(u8, past_basename, " \t");
+            const line_num_str = tok_it.next() orelse continue;
+            const line_num = std.fmt.parseInt(usize, line_num_str, 10) catch continue;
+            try coverage.markExecutable(file_path.?, line_num);
+        }
+    }
+
+    pub fn getFileInfo(self: *Coverage, path: []const u8) !*FileInfo {
+        var entry = try self.paths_to_file_info.getOrPut(self.allocator, path);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = try self.allocator.dupe(u8, path);
+            var covered_set = try self.allocator.create(LineSet);
+            covered_set.* = LineSet{};
+            var executable_set = try self.allocator.create(LineSet);
+            executable_set.* = LineSet{};
+            entry.value_ptr.* = .{
+                .covered = covered_set,
+                .executable = executable_set,
+            };
+        }
+        return entry.value_ptr;
+    }
+
+    pub fn markCovered(self: *Coverage, path: []const u8, line_num: usize) !void {
+        var file_info = try self.getFileInfo(path);
+        try file_info.covered.put(self.allocator, line_num, {});
+    }
+
+    pub fn markExecutable(self: *Coverage, path: []const u8, line_num: usize) !void {
+        var file_info = try self.getFileInfo(path);
+        try file_info.executable.put(self.allocator, line_num, {});
     }
 
     pub fn dumpDiffsToDir(self: *Coverage, dir: std.fs.Dir, root_dir_path: []const u8) !usize {
         var num_dumped: usize = 0;
         var filename_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        var it = self.paths_to_covered_line_nums.iterator();
+        var it = self.paths_to_file_info.iterator();
         while (it.next()) |path_entry| {
             const abs_path = path_entry.key_ptr.*;
             if (!std.mem.startsWith(u8, abs_path, root_dir_path)) {
@@ -307,16 +459,25 @@ const Coverage = struct {
             const filename = try std.fmt.bufPrint(&filename_buf, "{s}.diff", .{relative_path});
             var out_file = try dir.createFile(filename, .{ .truncate = true });
 
+            var has_executable_info = path_entry.value_ptr.executable.count() != 0;
             var line_num: usize = 1;
             var reader = std.io.bufferedReader(in_file.reader()).reader();
             var writer = out_file.writer();
             while (try reader.readUntilDelimiterOrEofAlloc(self.allocator, '\n', std.math.maxInt(usize))) |line| {
                 defer self.allocator.free(line);
 
-                if (path_entry.value_ptr.*.get(line_num) != null) {
+                if (path_entry.value_ptr.covered.get(line_num) != null) {
                     try writer.writeAll("> ");
                 } else {
-                    try writer.writeAll("! ");
+                    if (has_executable_info) {
+                        if (path_entry.value_ptr.executable.get(line_num) != null) {
+                            try writer.writeAll("! ");
+                        } else {
+                            try writer.writeAll("  ");
+                        }
+                    } else {
+                        try writer.writeAll("! ");
+                    }
                 }
                 try writer.writeAll(line);
                 try writer.writeByte('\n');
@@ -328,4 +489,66 @@ const Coverage = struct {
 
         return num_dumped;
     }
+
+    pub fn writeSummary(self: *Coverage, stream: anytype, root_dir_path: []const u8) !void {
+        try stream.print("{s:<36} {s:<11} {s:<14} {s:>8}\n", .{ "File", "Covered LOC", "Executable LOC", "Coverage" });
+        try stream.print("{s:-<36} {s:-<11} {s:-<14} {s:-<8}\n", .{ "", "", "", "" });
+
+        var total_covered_lines: usize = 0;
+        var total_executable_lines: usize = 0;
+        var it = self.paths_to_file_info.iterator();
+        while (it.next()) |path_entry| {
+            const abs_path = path_entry.key_ptr.*;
+            if (!std.mem.startsWith(u8, abs_path, root_dir_path)) {
+                continue;
+            }
+
+            var relative_path = abs_path[root_dir_path.len..];
+            // trim any preceding separators
+            while (relative_path.len != 0 and std.fs.path.isSep(relative_path[0])) {
+                relative_path = relative_path[1..];
+            }
+
+            var has_executable_info = path_entry.value_ptr.executable.count() != 0;
+            if (!has_executable_info) {
+                try stream.print("{s:<36} <no executable line info>\n", .{relative_path});
+            } else {
+                const covered_lines = path_entry.value_ptr.covered.count();
+                const executable_lines = path_entry.value_ptr.executable.count();
+                const percentage_covered = @intToFloat(f64, covered_lines) / @intToFloat(f64, executable_lines);
+                if (truncatePathLeft(relative_path, 36)) |truncated_path| {
+                    try stream.print("...{s:<33}", .{truncated_path});
+                } else {
+                    try stream.print("{s:<36}", .{relative_path});
+                }
+                try stream.print(" {d:<11} {d:<14} {d:>7.2}%\n", .{ covered_lines, executable_lines, percentage_covered * 100 });
+
+                total_covered_lines += covered_lines;
+                total_executable_lines += executable_lines;
+            }
+        }
+
+        if (total_executable_lines > 0) {
+            try stream.print("{s:-<36} {s:-<11} {s:-<14} {s:-<8}\n", .{ "", "", "", "" });
+
+            const total_percentage_covered = @intToFloat(f64, total_covered_lines) / @intToFloat(f64, total_executable_lines);
+            try stream.print("{s:<36} {d:<11} {d:<14} {d:>7.2}%\n", .{ "Total", total_covered_lines, total_executable_lines, total_percentage_covered * 100 });
+        }
+    }
 };
+
+fn truncatePathLeft(str: []const u8, max_width: usize) ?[]const u8 {
+    if (str.len <= max_width) return null;
+    const start_offset = str.len - (max_width - 3);
+    var truncated = str[start_offset..];
+    while (truncated.len > 0 and !std.fs.path.isSep(truncated[0])) {
+        truncated = truncated[1..];
+    }
+    // if we got to the end with no path sep found, then just return
+    // the plain (max widdth - 3) string
+    if (truncated.len == 0) {
+        return str[start_offset..];
+    } else {
+        return truncated;
+    }
+}
