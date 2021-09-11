@@ -1,7 +1,7 @@
 grindcov
 ========
 
-Basic code coverage generation tool using [Callgrind](https://valgrind.org/docs/manual/cl-manual.html) (via Valgrind). Created with [Zig](https://ziglang.org/) code in mind, but should work for any compiled binary with debug information.
+Code coverage generation tool using [Callgrind](https://valgrind.org/docs/manual/cl-manual.html) (via Valgrind). Created with [Zig](https://ziglang.org/) code in mind, but should work for any compiled binary with debug information.
 
 The output is a directory with `.diff` files for each source file instrumented by callgrind, with either a `! ` (not executed), a `> ` (executed), or a `  ` (not executable) prefix for every line of source code (the `.diff` and `!`/`>` prefixes are just so that code editors syntax highlight the results in an understandable way).
 
@@ -39,17 +39,23 @@ Total                                6           7                85.71%
 
 ## Building / Installation
 
+### Prebuilt Binaries
+
+A prebuilt x86_64 Linux binary can be downloaded from the [latest release](https://github.com/squeek502/grindcov/releases/latest).
+
+### Runtime Dependencies
+
+- [Valgrind](https://valgrind.org/)
+- [`readelf`](https://man7.org/linux/man-pages/man1/readelf.1.html) (optional, necessary for information about which lines are executable)
+
+### From Source
+
 Requires latest master of Zig. Currently only tested on Linux.
 
 1. Clone this repository and its submodules (`git clone --recursive` to get submodules)
 2. `zig build`
 3. The compiled binary will be in `zig-out/bin/grindcov`
 4. `mv` or `ln` the binary somewhere in your `PATH`
-
-### Dependencies
-
-- [Valgrind](https://valgrind.org/)
-- [`readelf`](https://man7.org/linux/man-pages/man1/readelf.1.html) (optional, necessary for information about which lines are executable)
 
 ## Usage
 
