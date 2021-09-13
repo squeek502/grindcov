@@ -1,6 +1,10 @@
 grindcov
 ========
 
+> Note: Since writing this tool, I was made aware of [kcov](https://github.com/SimonKagstrom/kcov) which is a more robust and *much* faster tool that can generate coverage information for Zig binaries. If you'd like to use `kcov` with Zig, I've written a [post that describes more generally how coverage tools like kcov can be used with Zig on zig.news](https://zig.news/squeek502/code-coverage-for-zig-1dk1).
+
+---
+
 Code coverage generation tool using [Callgrind](https://valgrind.org/docs/manual/cl-manual.html) (via Valgrind). Created with [Zig](https://ziglang.org/) code in mind, but should work for any compiled binary with debug information.
 
 The output is a directory with `.diff` files for each source file instrumented by callgrind, with either a `! ` (not executed), a `> ` (executed), or a `  ` (not executable) prefix for every line of source code (the `.diff` and `!`/`>` prefixes are just so that code editors syntax highlight the results in an understandable way).
