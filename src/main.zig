@@ -6,7 +6,7 @@ const clap = @import("clap");
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer assert(gpa.deinit() == false);
-    const allocator = &gpa.allocator;
+    const allocator = gpa.allocator();
 
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("-h, --help        Display this help and exit.") catch unreachable,
@@ -146,7 +146,7 @@ pub fn main() anyerror!void {
     }
 }
 
-pub fn checkCommandAvailable(allocator: *Allocator, cmd: []const u8) !bool {
+pub fn checkCommandAvailable(allocator: Allocator, cmd: []const u8) !bool {
     const result = std.ChildProcess.exec(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ cmd, "--version" },
@@ -164,7 +164,7 @@ pub fn checkCommandAvailable(allocator: *Allocator, cmd: []const u8) !bool {
     return !failed;
 }
 
-pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?[]const u8, custom_out_file_name: ?[]const u8) ![]const u8 {
+pub fn genCallgrind(allocator: Allocator, user_args: []const []const u8, cwd: ?[]const u8, custom_out_file_name: ?[]const u8) ![]const u8 {
     const valgrind_args = &[_][]const u8{
         "valgrind",
         "--tool=callgrind",
@@ -241,7 +241,7 @@ pub fn genCallgrind(allocator: *Allocator, user_args: []const []const u8, cwd: ?
 }
 
 const Coverage = struct {
-    allocator: *Allocator,
+    allocator: Allocator,
     paths_to_file_info: Info,
 
     pub const LineSet = std.AutoHashMapUnmanaged(usize, void);
@@ -251,7 +251,7 @@ const Coverage = struct {
     };
     pub const Info = std.StringHashMapUnmanaged(FileInfo);
 
-    pub fn init(allocator: *Allocator) Coverage {
+    pub fn init(allocator: Allocator) Coverage {
         return .{
             .allocator = allocator,
             .paths_to_file_info = Coverage.Info{},
@@ -270,7 +270,7 @@ const Coverage = struct {
         self.paths_to_file_info.deinit(self.allocator);
     }
 
-    pub fn getCoveredLines(coverage: *Coverage, allocator: *Allocator, callgrind_file_path: []const u8) !void {
+    pub fn getCoveredLines(coverage: *Coverage, allocator: Allocator, callgrind_file_path: []const u8) !void {
         var callgrind_file = try std.fs.cwd().openFile(callgrind_file_path, .{});
         defer callgrind_file.close();
 
@@ -323,7 +323,7 @@ const Coverage = struct {
         }
     }
 
-    pub fn getExecutableLines(coverage: *Coverage, allocator: *Allocator, cmd: []const u8, cwd: ?[]const u8) !void {
+    pub fn getExecutableLines(coverage: *Coverage, allocator: Allocator, cmd: []const u8, cwd: ?[]const u8) !void {
         // TODO: instead of readelf, use Zig's elf/dwarf std lib functions
         const result = try std.ChildProcess.exec(.{
             .allocator = allocator,
